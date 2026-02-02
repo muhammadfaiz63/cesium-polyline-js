@@ -18,10 +18,7 @@ async function fetchTileJSONInfo(url) {
   const tileTemplate = json.tiles[0];
   const origin = new URL(url).origin;
 
-  const tileURL =
-    tileTemplate.startsWith("http")
-      ? tileTemplate
-      : origin + tileTemplate;
+  const tileURL = tileTemplate.startsWith("http") ? tileTemplate : origin + tileTemplate;
 
   return {
     bbox: { minLon, minLat, maxLon, maxLat },
@@ -125,13 +122,7 @@ async function loadTerrainPixels(bbox, tileURLTemplate) {
           )
             continue;
 
-          const { lon, lat } = pixelToLonLat(
-            ZOOM,
-            x,
-            y,
-            px,
-            py
-          );
+          const { lon, lat } = pixelToLonLat(ZOOM, x, y, px, py);
 
           points.push({ lon, lat, height });
         }
