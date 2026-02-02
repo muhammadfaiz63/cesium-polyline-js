@@ -2,8 +2,8 @@ import * as Cesium from "cesium";
 
 let viewer;
 
-const TERRAIN_RGB_BASE =
-  "http://localhost:8080/api/map-viewer/topo_2026-01-10.tif/collections/default/terrain-rgb/tiles";
+const urlTileJson =
+  "http://localhost:8080/api/map-viewer/topo_2026-01-10.tif/collections/default/terrain-rgb/tile.json";
 
 const ZOOM = 14;
 
@@ -15,6 +15,28 @@ const MIN_HEIGHT_DIFF = 2;
 const MIN_VALID_HEIGHT = -100;
 const MAX_VALID_HEIGHT = 3000;
 const MIN_VALID_RATIO = 0.7;
+
+async function fetchTileJSONInfo(url) {
+  const res = await fetch(url);
+  const json = await res.json();
+
+  const [minLon, minLat, maxLon, maxLat] = json.bounds;
+
+  const tileTemplate = json.tiles[0];
+
+  const origin = new URL(url).origin;
+
+  const tileURL =
+    tileTemplate.startsWith("http")
+      ? tileTemplate
+      : origin + tileTemplate;
+
+  return {
+    bbox: { minLon, minLat, maxLon, maxLat },
+    tileURL,
+  };
+}
+
 
 function loadImage(url) {
   return new Promise((resolve, reject) => {
@@ -47,7 +69,7 @@ function lonLatToTile(lon, lat, z) {
 
 const tileCache = new Map();
 
-async function sampleTerrainRGB(lon, lat) {
+async function sampleTerrainRGB(lon, lat, tileURLTemplate) {
   const tile = lonLatToTile(lon, lat, ZOOM);
   const key = `${ZOOM}/${tile.x}/${tile.y}`;
 
@@ -55,7 +77,11 @@ async function sampleTerrainRGB(lon, lat) {
   if (tileCache.has(key)) {
     canvas = tileCache.get(key);
   } else {
-    const url = `${TERRAIN_RGB_BASE}/${ZOOM}/${tile.x}/${tile.y}`;
+    const url = tileURLTemplate
+      .replace("{z}", ZOOM)
+      .replace("{x}", tile.x)
+      .replace("{y}", tile.y);
+
     const img = await loadImage(url);
 
     canvas = document.createElement("canvas");
@@ -68,6 +94,8 @@ async function sampleTerrainRGB(lon, lat) {
 
   const ctx = canvas.getContext("2d");
   const [r, g, b] = ctx.getImageData(tile.px, tile.py, 1, 1).data;
+
+  if (r === 0 && g === 0 && b === 0) return NaN;
 
   return (r * 256 * 256 + g * 256 + b) * 0.1 - 10000;
 }
@@ -84,19 +112,12 @@ function initCesium() {
   viewer.scene.globe.depthTestAgainstTerrain = false;
 }
 
-async function getTopoFromTerrainRGB() {
+async function getTopoFromTerrainRGB(bbox, tileURLTemplate) {
   const points = [];
-
-  const bbox = {
-    minLon: 103.80,
-    maxLon: 103.85,
-    minLat: -3.81,
-    maxLat: -3.76,
-  };
 
   for (let lon = bbox.minLon; lon <= bbox.maxLon; lon += STEP) {
     for (let lat = bbox.minLat; lat <= bbox.maxLat; lat += STEP) {
-      const height = await sampleTerrainRGB(lon, lat);
+      const height = await sampleTerrainRGB(lon, lat, tileURLTemplate);
 
       if (
         !isNaN(height) &&
@@ -130,19 +151,20 @@ function smoothHeights(points, window = 4) {
 function heightToColorIndex(height, minH, maxH) {
   const t = Cesium.Math.clamp((height - minH) / (maxH - minH), 0, 1);
 
-  if (t < 0.25) return 0;
-  if (t < 0.5)  return 1;
-  if (t < 0.75) return 2;
-  return 3;
+  if (t < 0.2) return 0;
+  if (t < 0.4) return 1;
+  if (t < 0.6) return 2;
+  if (t < 0.8) return 3;
+  return 4;
 }
 
 const COLOR_BUCKETS = [
-  Cesium.Color.BLUE.withAlpha(0.9),
+  Cesium.Color.BLUE.withAlpha(0.0),
   Cesium.Color.CYAN.withAlpha(0.9),
   Cesium.Color.YELLOW.withAlpha(0.9),
+  Cesium.Color.ORANGE.withAlpha(0.9),
   Cesium.Color.RED.withAlpha(0.9),
 ];
-
 
 function renderPolylineStack(viewer, dataTopo) {
   const strips = new Map();
@@ -154,7 +176,7 @@ function renderPolylineStack(viewer, dataTopo) {
   }
 
   for (const points of strips.values()) {
-    if (points.length < 3) continue;
+    if (points.length < 5) continue;
 
     const validPoints = points.filter(
       p => p.height > MIN_VALID_HEIGHT && p.height < MAX_VALID_HEIGHT
@@ -172,8 +194,7 @@ function renderPolylineStack(viewer, dataTopo) {
 
     if (maxH - minH < MIN_HEIGHT_DIFF) continue;
 
-    // 4 bucket warna
-    const bucketPositions = [[], [], [], []];
+    const bucketPositions = [[], [], [], [], []];
 
     for (let i = 0; i < smoothed.length - 1; i++) {
       const p1 = smoothed[i];
@@ -188,7 +209,6 @@ function renderPolylineStack(viewer, dataTopo) {
       );
     }
 
-    // maksimal 4 entity per strip
     for (let i = 0; i < bucketPositions.length; i++) {
       if (bucketPositions[i].length < 2) continue;
 
@@ -204,14 +224,18 @@ function renderPolylineStack(viewer, dataTopo) {
   }
 }
 
-
 async function main() {
   initCesium();
 
-  const dataTopo = await getTopoFromTerrainRGB();
+  const { bbox, tileURL } = await fetchTileJSONInfo(urlTileJson);
+
+  const dataTopo = await getTopoFromTerrainRGB(bbox, tileURL);
+
+  const centerLon = (bbox.minLon + bbox.maxLon) / 2;
+  const centerLat = (bbox.minLat + bbox.maxLat) / 2;
 
   viewer.camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(103.825, -3.785, 800),
+    destination: Cesium.Cartesian3.fromDegrees(centerLon, centerLat, 800),
     duration: 0,
   });
 
